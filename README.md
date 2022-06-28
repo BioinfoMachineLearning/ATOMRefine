@@ -13,5 +13,30 @@ Atomic protein structure refinement using all-atom graph representations and SE(
 ```bash
 git clone https://github.com/BioinfoMachineLearning/ATOMRefine.git
 cd ATOMRefine
+conda env create -f SE3Refine-linux-cu101.yml
+```
 
+## Prediction
+```bash
+sh refine.sh <init_pdb> <target_id> <seq_length> <outdir>
+
+Inputs:
+init_pdb: starting model in pdb format
+target_id: protein target id
+seq_length: protein sequence seq_length
+outdir: output folder
+
+Expected outputs:
+Five refined models in pdb format
+```
+
+## Data
+
+
+## Training
+```bash
+sh train.sh
+
+python train.py --data <data_dir> --out_path <out_dir> --lst 1
+lst: training set id (1 - 10) as 10 folds
 ```
