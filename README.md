@@ -40,3 +40,7 @@ sh train.sh
 python train.py --data <data_dir> --out_path <out_dir> --lst 1
 lst: training set id (1 - 10) as 10 folds
 ```
+
+## References
+
+Tianqi Wu and Jianlin Cheng. Atomic protein structure refinement using all-atom graph representations and SE(3)-equivariant graph neural networks. bioRxiv, 2022. [link](https://doi.org/10.1101/2022.05.06.490934)
