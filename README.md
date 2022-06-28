@@ -13,7 +13,7 @@ Atomic protein structure refinement using all-atom graph representations and SE(
 ```bash
 git clone https://github.com/BioinfoMachineLearning/ATOMRefine.git
 cd ATOMRefine
-conda env create -f SE3Refine-linux-cu101.yml
+conda env create -f ATOMRefine-linux-cu101.yml
 ```
 
 ## Prediction
