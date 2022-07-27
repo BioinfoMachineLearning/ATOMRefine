@@ -100,10 +100,6 @@ class SE3Transformer(nn.Module):
 
     @torch.cuda.amp.autocast(enabled=False)
     def forward(self, G, type_0_features, type_1_features):
-        #print(type_0_features.size(), type_1_features.size())
-        #G: Graph(num_nodes=138, num_edges=17708,ndata_schemes={},edata_schemes={'d': Scheme(shape=(3,), dtype=torch.float32), 'w': Scheme(shape=(32,), dtype=torch.float32)})
-        #type_0_features:[138, 32, 1] type_1_features:[138, 3, 3]
-        
         # Compute equivariant weight basis from relative positions
         basis, r = get_basis_and_r(G, self.num_degrees-1)
         h = {'0': type_0_features, '1': type_1_features}
