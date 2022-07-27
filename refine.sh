@@ -15,7 +15,7 @@ targetid=$2
 seq_l=$3
 outdir=$4
 
-source /home/bml_casp15/anaconda3/bin/activate SE3Refine
+conda activate ATOMRefine
 
 ### Check if the initial pdb file does not exist ###
 if [ ! -f $init_pdb ] 
