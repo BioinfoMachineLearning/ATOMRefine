@@ -24,39 +24,6 @@ warnings.filterwarnings("ignore")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def refine_coords(coords, n_steps=1):
-    vdw_dist, cov_dist = 3.0, 3.78
-    k_vdw, k_cov = 100.0, 100.0
-    min_speed = 0.001
-
-    for i in range(n_steps):
-        n_res = coords.size(0)
-        accels = coords * 0
-
-        # Steric clashing
-        crep = coords.unsqueeze(0).expand(n_res, -1, -1)
-        diffs = crep - crep.transpose(0, 1)
-        dists = diffs.norm(dim=2).clamp(min=0.01, max=10.0)
-        norm_diffs = diffs / dists.unsqueeze(2)
-        violate = (dists < vdw_dist).to(torch.float) * (vdw_dist - dists)
-        forces = k_vdw * violate
-        pair_accels = forces.unsqueeze(2) * norm_diffs
-        accels += pair_accels.sum(dim=0)
-
-        # Adjacent C-alphas
-        diffs = coords[1:] - coords[:-1]
-        dists = diffs.norm(dim=1).clamp(min=0.1)
-        norm_diffs = diffs / dists.unsqueeze(1)
-        violate = (dists - cov_dist).clamp(max=3.0)
-        forces = k_cov * violate
-        accels_cov = forces.unsqueeze(1) * norm_diffs
-        accels[:-1] += accels_cov
-        accels[1: ] -= accels_cov
-
-        coords = coords + accels.clamp(min=-100.0, max=100.0) * min_speed
-
-    return coords
-
 def _collate_fn(batch):
     nodes = []
     pairs = []
@@ -98,9 +65,9 @@ def datalist(pdb_dir,true_dir,train_dir,lst,tm_thre=0.0,test_mode=None):
         if tm >= tm_thre:
             continue
         if test_mode == "casp14r":
-            train_lst.append(["/storage/htc/bdm/tianqi/capsule-5769140/casp14_refine/init_model/"+tar+".pdb","/storage/htc/bdm/tianqi/capsule-5769140/casp14_refine/init_model/"+tar+".npy","/storage/htc/bdm/tianqi/capsule-5769140/casp14_refine/init_model/"+tar+".npy",tm])
+            train_lst.append(["casp14_refine/init_model/"+tar+".pdb","casp14_refine/init_model/"+tar+".npy","casp14_refine/init_model/"+tar+".npy",tm])
         elif test_mode == "casp14t":
-            train_lst.append(["/storage/hpc/data/wuti/refine/data/init_model_casp14/"+tar+".pdb","/storage/hpc/data/wuti/refine/data/init_model_casp14/"+tar+".npy","/storage/hpc/data/wuti/refine/data/init_model_casp14/"+tar+".npy",tm])
+            train_lst.append(["init_model_casp14/"+tar+".pdb","init_model_casp14/"+tar+".npy","init_model_casp14/"+tar+".npy",tm])
         else:
             train_lst.append([pdb_dir+"/all/"+tar+".pdb",pdb_dir+"/all/"+tar+".npy",true_dir+"/xyz/"+tar+".npy",tm])
     return train_lst
@@ -140,8 +107,8 @@ if __name__ == '__main__':
     pl.utilities.seed.seed_everything(seed=test_seed)
 
     src_dir = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
-    pdb_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/init_model"
-    true_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/true_model"
+    pdb_dir = "/storage/htc/bdm/tianqi/data/init_model"
+    true_dir = "/storage/htc/bdm/tianqi/data/true_model"
     train_lst = datalist(pdb_dir, true_dir, train_dir,"all_train500.lst",tm_thre=0.9)
     val_lst = datalist(pdb_dir, true_dir, train_dir,"valid.lst",tm_thre=0.8)
     test_lst = datalist(pdb_dir, true_dir, train_dir,"test.lst",tm_thre=1.1,test_mode=None)
@@ -216,7 +183,6 @@ if __name__ == '__main__':
 
                 offset_lst = []
                 count = 1
-                #model_lst = ["model5/SE3Refine-epoch=15-avg_rmse=5.642.ckpt","model6/SE3Refine-epoch=28-avg_rmse=4.416.ckpt","model7/SE3Refine-epoch=21-avg_rmse=5.133.ckpt","model8/SE3Refine-epoch=41-avg_rmse=5.129.ckpt"]
                 model_lst = ["model1/SE3Refine-epoch=26-avg_rmse=5.271.ckpt","model3/SE3Refine-epoch=29-avg_rmse=4.907.ckpt","model4/SE3Refine-epoch=23-avg_rmse=4.138.ckpt","last.ckpt.bkp","SE3Refine-epoch=20-avg_rmse=6.436.ckpt"]
                 for model_file in model_lst:
                     model = test_model.load_from_checkpoint(src_dir+"/output/"+model_file)
@@ -255,23 +221,21 @@ if __name__ == '__main__':
                     pair = model.norm_edge3(model.embed_e2(pair))
                     
                     # define graph
-                    #xyz:[2, 138, 3, 3], pair:[2, 138, 138, 32], idx:[2, 138], top_k:64
                     for i in range(1):
                         if i >0:
                             xyz = xyz_new_tmp.reshape(bsz,L,3,3)
                         G = make_graph(xyz, pair, idx, top_k=18)
-                        l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2) # l1 features = displacement vector to CA
+                        l1_feats = xyz - xyz[:,:,1,:].unsqueeze(2)
                         l1_feats = l1_feats.reshape(bsz*L, -1, 3)
                         
-                        # apply SE(3) Transformer & update coordinates
-                        #node.reshape(B*L, -1, 1):[276, 32, 1], l1_feats:[276, 3, 3]
-                        shift = model.se3(G, node.reshape(bsz*L, -1, 1), l1_feats) # 0: [276, 8, 1] 1: [276, 3, 3]
-                        offset = shift['1'].reshape(bsz, L, -1, 3) # (B, L, 3, 3)  torch.Size([2, 138, 3, 3])
+                        # SE(3) Transformer
+                        shift = model.se3(G, node.reshape(bsz*L, -1, 1), l1_feats)
+                        offset = shift['1'].reshape(bsz, L, -1, 3)
                         offset_lst.append(offset)
 
-                        CA_new = xyz[:,:,1] + offset[:,:,1]  # [2, 138, 3]
-                        N_new = CA_new + offset[:,:,0]  # [2, 138, 3]
-                        C_new = CA_new + offset[:,:,2]  # [2, 138, 3]
+                        CA_new = xyz[:,:,1] + offset[:,:,1]
+                        N_new = CA_new + offset[:,:,0]
+                        C_new = CA_new + offset[:,:,2]
                         xyz_new = torch.stack([N_new, CA_new, C_new], dim=2)
 
                         xyz_new1 = xyz_new[0]
@@ -282,19 +246,16 @@ if __name__ == '__main__':
                         xyz_new2 = xyz_new2.reshape(L,9)
                         xyz_new = (xyz_new1+xyz_new2)/2
 
-                        #y_global = refine_coords(xyz_new)
                         os.system("mkdir -p output/pre")
                         np.save("output/pre/"+pdb,xyz_new.cpu().numpy())
-                        #print("python /storage/htc/bdm/tianqi/capsule-5769140/code_demo3/xyz2pdb.py /storage/htc/bdm/tianqi/capsule-5769140/casp14_refine/true_model/fasta/"+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
-                        os.system("python /storage/htc/bdm/tianqi/capsule-5769140/code_demo3/xyz2pdb.py /storage/hpc/data/wuti/refine/data/true_model/fasta/"+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
+                        os.system("python "+src_dir+"/xyz2pdb.py "+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
                         os.system("mv output/pre/"+pdb+".pdb output/pre/model/"+pdb+str(count)+".pdb")
                         count = count+1
                         os.system("rm output/pre/"+pdb+".npy")
                 offset = torch.mean(torch.stack(offset_lst), dim=0)
-                #torch.save(offset, "output/pre/"+pdb+".pt")
-                CA_new = xyz[:,:,1] + offset[:,:,1]  # [2, 138, 3]
-                N_new = CA_new + offset[:,:,0]  # [2, 138, 3]
-                C_new = CA_new + offset[:,:,2]  # [2, 138, 3]
+                CA_new = xyz[:,:,1] + offset[:,:,1]
+                N_new = CA_new + offset[:,:,0]
+                C_new = CA_new + offset[:,:,2]
                 xyz_new = torch.stack([N_new, CA_new, C_new], dim=2)
                 
                 xyz_new1 = xyz_new[0]
@@ -310,11 +271,9 @@ if __name__ == '__main__':
                 loss = torch.sqrt(model.lossfn(y_init, y_coord)/seq_l[0])
                 loss_init.append(loss)
                 
-                #y_global = refine_coords(y_global)
                 os.system("mkdir -p output/pre")
                 np.save("output/pre/"+pdb,xyz_new.cpu().numpy())
-                #print("python /storage/htc/bdm/tianqi/capsule-5769140/code_demo3/xyz2pdb.py /storage/htc/bdm/tianqi/capsule-5769140/casp14_refine/true_model/fasta/"+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
-                os.system("python /storage/htc/bdm/tianqi/capsule-5769140/code_demo3/xyz2pdb.py /storage/hpc/data/wuti/refine/data/true_model/fasta/"+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
+                os.system("python "+src_dir+"/xyz2pdb.py "+pdb+".fasta "+src_dir+"/output/pre/"+pdb+".npy "+src_dir+"/output/pre/")
                 os.system("rm output/pre/"+pdb+".npy")
             loss_avg_init = torch.mean(torch.stack(loss_init))
             loss_avg = torch.mean(torch.stack(loss_refine))
