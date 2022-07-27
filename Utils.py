@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # encoding: utf-8
+# Original script from Jing, X. GNNRefine: fast and effective protein model refinement by deep graph neural networks (Code Ocean, 2021); https://doi.org/10.24433/CO.8813669.v1
+# With local frame construct and relative position/orentation function added 
 
 import os, pickle
 import numpy as np
@@ -133,7 +135,6 @@ def calc_geometry_maps(structure_file, res_range=None,
     geometry_types = set(geometry_types) & set(['Ca1-Ca2','Cb1-Cb2','N1-O2','Ca1-Cb1-Cb2','N1-Ca1-Cb1-Cb2','Ca1-Cb1-Cb2-Ca2'])
     # load pdb file
     structure = pdb_parser.get_structure("tmp_stru", structure_file)
-    # model = structure.get_list()[0]
     residues = [_ for _ in structure.get_residues()]
     if not res_range: res_range = [1, len(residues)]
 
@@ -173,9 +174,8 @@ def calc_geometry_maps(structure_file, res_range=None,
         for _atom in gmt_type.split('-'):
             _atom_type = _atom[:-1].upper()
             id_atom[_atom[-1]].append(_atom_type)
-            # if _atom[-1]=='1': # i
             _data = np.repeat(coordinates[_atom_type], res_num, axis=0).reshape((res_num, res_num, 3))
-            if _atom[-1]=='2': # j
+            if _atom[-1]=='2':
                 _data = np.transpose(_data, (1, 0, 2))
             if points_map is None:
                 points_map = _data[:,:,None,:]
@@ -235,19 +235,15 @@ def get_atom_emb(pdb_file, true_pdb, res_range, model_id=0, chain_id=0):
     
     atom_lst = []
     CA_lst = []
-    #res_atom = defaultdict(list)
     for residue,residue_true in zip(residue_list,residue_list_true):
         if residue_true.id[1]<res_range[0] or residue_true.id[1]>res_range[1]: continue
         res_index = residue.id[1]-res_range[0]
         atom_pos, onehot = [], []
         _resname = residue_true.get_resname() if residue_true.get_resname() in heavy_atoms else 'GLY'
         for _atom in heavy_atoms[_resname]['atoms']:
-            #if (not _atom=='CA') and residue.has_id(_atom):
             if residue_true.has_id(_atom):
-                #res_atom[_resname+str(residue.id[1]-res_range[0])].append(_atom)
                 atom_pos.append(residue[_atom].coord)
                 _onehot = np.zeros(len(atom_dict))
-                #_onehot[atom_dict[_atom[:1]]] = 1
                 _onehot[atom_dict[_atom]] = 1
                 onehot.append(_onehot)
         atom_lst.append(len(atom_pos))
@@ -257,12 +253,10 @@ def get_atom_emb(pdb_file, true_pdb, res_range, model_id=0, chain_id=0):
         atom_embs[residue.id[1]-res_range[0]] = atom_emb.astype(np.float16)
         atom_xyz[residue.id[1]-res_range[0]] = np.array(atom_pos).astype(np.float16)
 
-    #embedding = np.zeros((res_num, 14, 7))
     atom_nums = np.zeros((res_num))
     for i, _item in enumerate(atom_embs):
         if not np.isscalar(_item): # not -1, no data
             atom_nums[i] = _item.shape[0]
-            #embedding[i, :_item.shape[0], :] = _item
 
     #return embedding
     return atom_embs,atom_xyz,atom_lst,CA_lst#s,res_atom

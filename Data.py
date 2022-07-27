@@ -9,17 +9,8 @@ from covalent import cal_covalent
 import os,re
 
 class Data(Dataset):
-    def __init__(self, start_pdbs,
-                    seq_feat_types=['onehot', 'rPosition', 'SepEnc'], 
-                    struc_feat_types=['SS3', 'RSA', 'Dihedral', 'Ca1-Ca2', 'Cb1-Cb2', 'N1-O2', 'Ca1-Cb1-Cb2', 'N1-Ca1-Cb1-Cb2', 'Ca1-Cb1-Cb2-Ca2'], 
-                    adj_type='Cb1-Cb2', adj_cutoff=10, test_mode = False
-                ):
+    def __init__(self, start_pdbs, test_mode = False):
         self.start_pdbs = start_pdbs
-        self.seq_feat_types = seq_feat_types
-        self.struc_feat_types = struc_feat_types
-        self.adj_type = adj_type
-        self.adj_cutoff = adj_cutoff
-        self.feat_class = {'seq': {'node': ['onehot', 'rPosition'], 'edge': ['SepEnc']}, 'struc': {'node': ['SS3', 'RSA', 'Dihedral'], 'edge': ['Ca1-Ca2', 'Cb1-Cb2', 'N1-O2', 'Ca1-Cb1-Cb2', 'N1-Ca1-Cb1-Cb2', 'Ca1-Cb1-Cb2-Ca2']}}
         self.data_len = len(self.start_pdbs)
         self.test_mode = test_mode
     
@@ -33,28 +24,19 @@ class Data(Dataset):
             'onehot': Utils.get_seq_onehot(seq),
             'rPosition': Utils.get_rPos(seq),
         }
-        # edge_feat
-        # edge_feat = {
-            # 'SepEnc': Utils.get_SepEnc(seq),
-        # }
-        # return node_feat, edge_feat, len(seq)
         return node_feat, len(seq)
 
     def __get_struc_feat(self, pdb_file, true_pdb, seq_len):
         # node feat
         node_feat = Utils.get_DSSP_label(pdb_file, [1, seq_len])
         # atom_emb
-        #embedding, atom_pos, atom_lst, CA_lst, res_atom = Utils.get_atom_emb(pdb_file, true_pdb, [1, seq_len])
         embedding, atom_pos, atom_lst, CA_lst = Utils.get_atom_emb(pdb_file, true_pdb, [1, seq_len])
         node_feat['atom_emb'] = {
             'embedding': embedding,
             'atom_pos': atom_pos,
             'atom_lst': atom_lst,
             'CA_lst': CA_lst,
-            #'res_atom': res_atom
         }
-        # edge feat
-        # edge_feat = Utils.calc_geometry_maps(pdb_file, [1, seq_len], self.feat_class['struc']['edge'])
         return node_feat
 
     def __getitem__(self, idx):
@@ -93,7 +75,6 @@ class Data(Dataset):
         true_pos = np.vstack(true_pos)
         
         atom_lst = struc_node_feat['atom_emb']['atom_lst']
-        #res_atom = struc_node_feat['atom_emb']['res_atom']
         CA_lst = struc_node_feat['atom_emb']['CA_lst']
         CA_pos = np.vstack(CA_lst)
 
@@ -101,12 +82,12 @@ class Data(Dataset):
             p, q, k, t = Utils.set_lframe(pdb_file, atom_xyz, atom_lst, [1, seq_len])
             #init_dir = os.path.dirname(os.path.dirname(pdb_file))
         else:
-            init_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/init_model"
+            init_dir = "/storage/htc/bdm/tianqi/data/init_model"
             tar = os.path.basename(pdb_file)
             tar = re.sub("\.pdb","",tar)
             if not os.path.exists(init_dir+"/p/"+tar+".npy"):
                 p, q, k, t = Utils.set_lframe(pdb_file, atom_xyz, atom_lst, [1, seq_len])
-                init_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/init_model"
+                init_dir = "/storage/htc/bdm/tianqi/data/init_model"
                 tar = os.path.basename(pdb_file)
                 tar = re.sub("\.pdb","",tar)
                 print(tar)
