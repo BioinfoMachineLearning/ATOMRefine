@@ -63,6 +63,16 @@ def make_graph(xyz, pair, idx, top_k=18, kmin=12):
     G.edata['w'] = pair[b,i,j]
     return G
 
+def get_bonded_neigh(idx):
+    neighbor = idx[:,None,:] - idx[:,:,None]
+    neighbor = neighbor.float()
+    sign = torch.sign(neighbor) # (B, L, L)
+    neighbor = torch.abs(neighbor)
+    neighbor[neighbor > 1] = 0.0
+    neighbor = sign * neighbor 
+    return neighbor.unsqueeze(-1)
+
+
 def rbf(D):
     # Distance radial basis function
     D_min, D_max, D_count = 0., 20., 36
