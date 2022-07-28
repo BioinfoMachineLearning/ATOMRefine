@@ -27,5 +27,5 @@ init_pdb=$(realpath $init_pdb)
 
 [ ! -d $outdir ] && mkdir -p $outdir
 
-CUDA_VISIBLE_DEVICES=-1 python $ROOT/predict.py --init $init_pdb --id $targetid --seql $seq_l --out_path $outdir --test
+python $ROOT/predict.py --init $init_pdb --id $targetid --seql $seq_l --out_path $outdir --test
 
