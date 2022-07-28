@@ -1,4 +1,4 @@
-name: SE3Refine
+name: ATOMRefine
 channels:
   - rusty1s
   - pytorch
