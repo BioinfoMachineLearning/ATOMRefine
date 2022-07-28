@@ -9,7 +9,8 @@ from covalent import cal_covalent
 import os,re
 
 class Data(Dataset):
-    def __init__(self, start_pdbs, test_mode = False):
+    def __init__(self, start_pdbs, test_mode = False
+                ):
         self.start_pdbs = start_pdbs
         self.data_len = len(self.start_pdbs)
         self.test_mode = test_mode
@@ -28,14 +29,15 @@ class Data(Dataset):
 
     def __get_struc_feat(self, pdb_file, true_pdb, seq_len):
         # node feat
-        node_feat = Utils.get_DSSP_label(pdb_file, [1, seq_len])
+        node_feat = {}
         # atom_emb
-        embedding, atom_pos, atom_lst, CA_lst = Utils.get_atom_emb(pdb_file, true_pdb, [1, seq_len])
+        embedding, atom_pos, atom_lst, CA_lst, res_atom = Utils.get_atom_emb(pdb_file, true_pdb, [1, seq_len])
         node_feat['atom_emb'] = {
             'embedding': embedding,
             'atom_pos': atom_pos,
             'atom_lst': atom_lst,
             'CA_lst': CA_lst,
+            'res_atom': res_atom
         }
         return node_feat
 
@@ -75,30 +77,22 @@ class Data(Dataset):
         true_pos = np.vstack(true_pos)
         
         atom_lst = struc_node_feat['atom_emb']['atom_lst']
+        res_atom = struc_node_feat['atom_emb']['res_atom']
         CA_lst = struc_node_feat['atom_emb']['CA_lst']
         CA_pos = np.vstack(CA_lst)
 
         if self.test_mode:
             p, q, k, t = Utils.set_lframe(pdb_file, atom_xyz, atom_lst, [1, seq_len])
-            #init_dir = os.path.dirname(os.path.dirname(pdb_file))
         else:
             init_dir = "/storage/htc/bdm/tianqi/data/init_model"
             tar = os.path.basename(pdb_file)
             tar = re.sub("\.pdb","",tar)
             if not os.path.exists(init_dir+"/p/"+tar+".npy"):
                 p, q, k, t = Utils.set_lframe(pdb_file, atom_xyz, atom_lst, [1, seq_len])
-                init_dir = "/storage/htc/bdm/tianqi/data/init_model"
-                tar = os.path.basename(pdb_file)
-                tar = re.sub("\.pdb","",tar)
-                print(tar)
-                np.save(init_dir+"/p/"+tar, p)
-                np.save(init_dir+"/q/"+tar, q)
-                np.save(init_dir+"/k/"+tar, k)
-                np.save(init_dir+"/t/"+tar, t)
             else:
                 p = np.load(init_dir+"/p/"+tar+".npy")
                 q = np.load(init_dir+"/q/"+tar+".npy")
                 k = np.load(init_dir+"/k/"+tar+".npy")
                 t = np.load(init_dir+"/t/"+tar+".npy")
         pairs = np.concatenate([p,q,k,t],axis=-1)
-        return [com_emb, atom_xyz, atom_pos, atom_lst, CA_pos, true_pos, pdb_file, pairs, covalent]#, res_atom]
+        return [com_emb, atom_xyz, atom_pos, atom_lst, CA_pos, true_pos, pdb_file, pairs, covalent, res_atom]

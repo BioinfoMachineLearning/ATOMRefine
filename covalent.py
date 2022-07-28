@@ -42,7 +42,7 @@ RESIDUE_ATOM_BOND_STATE: Dict[str, Dict[str, str]] = {
         "O": "Odb",
         "OXT": "Osb",
         "CB": "Csb",
-        "H": "Hsb",
+        #"H": "Hsb",
     },
     "VAL": {"CG1": "Csb", "CG2": "Csb"},
     "LEU": {"CG": "Csb", "CD1": "Csb", "CD2": "Csb"},
@@ -166,7 +166,7 @@ def deprotonate_structure(df: pd.DataFrame) -> pd.DataFrame:
         # "Deprotonating protein. This removes H atoms from the pdb_df dataframe"
     # )
     return filter_dataframe(
-        df, by_column="atom_name", list_of_values=["H"], boolean=False
+        df, by_column="atom_name", list_of_values=['H', 'H2', 'H3', 'HA', 'HB2', 'HB3', 'HD1', 'HD2', 'HE1', 'HE2', 'HZ', 'HG2', 'HG3', 'HE21', 'HE22', 'HG', 'HD11', 'HD12', 'HD13', 'HD21', 'HD22', 'HD23', 'HB', 'HG21', 'HG22', 'HG23', 'HG1', 'HD3', 'HH', 'HG11', 'HG12', 'HG13', 'HE3', 'HZ1', 'HZ2', 'HZ3', 'HH2', 'HE', 'HH11', 'HH12', 'HH21', 'HH22', 'HA2', 'HA3', 'HB1'], boolean=False
     )
 
 def convert_structure_to_centroids(df: pd.DataFrame) -> pd.DataFrame:
@@ -274,7 +274,7 @@ def read_pdb_to_dataframe(
             + atomic_df.df["ATOM"]["atom_name"]
         )
     if verbose:
-        print(atomic_df)
+        print(atomic_df.df['ATOM'])
     return atomic_df
 
 def select_chains(
@@ -375,7 +375,7 @@ def process_dataframe(
     protein_df: pd.DataFrame,
     atom_df_processing_funcs: Optional[List[Callable]] = None,
     hetatom_df_processing_funcs: Optional[List[Callable]] = None,
-    granularity: str = "centroids",
+    granularity: str = "atoms",
     chain_selection: str = "all",
     insertions: bool = False,
     deprotonate: bool = True,
@@ -437,6 +437,7 @@ def process_dataframe(
     # Deprotonate structure by removing H atoms
     if deprotonate:
         atoms = deprotonate_structure(atoms)
+        atoms = atoms[(atoms['atom_name'] != 'OXT' )]
 
     # Restrict DF to desired granularity
     if granularity == "atom":
@@ -477,7 +478,8 @@ def process_dataframe(
     """
 
     # log.debug(f"Detected {len(protein_df)} total nodes")
-
+    #pd.set_option("display.max_rows", None, "display.max_columns", None)
+    #print(protein_df)
     return protein_df
 
 
