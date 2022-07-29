@@ -1,8 +1,6 @@
-#!/bin/bash -e
+#!/bin/bash
 # Tianqi Wu, 01-31-2022
 # The main script for SE3 all-atom level refinement
-
-conda activate ATOMRefine
 
 if [ $# != 4 ]; then
         echo "sh $0 <init_pdb> <target_id> <seq_length> <outdir>"
