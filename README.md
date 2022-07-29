@@ -18,6 +18,7 @@ conda env create -f ATOMRefine-linux-cu101.yml
 
 ## Prediction
 ```bash
+conda activate ATOMRefine
 sh refine.sh <init_pdb> <target_id> <seq_length> <outdir>
 
 Inputs:
