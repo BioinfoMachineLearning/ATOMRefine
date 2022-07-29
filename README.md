@@ -18,6 +18,7 @@ conda env create -f ATOMRefine-linux-cu101.yml
 
 ## Prediction
 ```bash
+conda activate ATOMRefine
 sh refine.sh <init_pdb> <target_id> <seq_length> <outdir>
 
 Inputs:
@@ -26,6 +27,7 @@ target_id: protein target id
 seq_length: protein sequence seq_length
 outdir: output folder
 
+e.g.  sh refine.sh example/T1062.pdb T1062 35 output
 Expected outputs:
 Five refined models in pdb format
 ```
