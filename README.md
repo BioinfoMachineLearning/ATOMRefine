@@ -33,7 +33,10 @@ Five refined models in pdb format
 ```
 
 ## Data
-
+All the required data for training are provided as below and avaiable at [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.6944368.svg)](https://doi.org/10.5281/zenodo.6944368):
+* Alphafold2 models (AF2_model.tar.gz)
+* target.lst for training (AF2 id and its corresponding true pdb id)
+* True experimental structures (true_experimental_structure.tar.gz)
 
 ## Training
 ```bash
