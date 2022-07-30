@@ -89,6 +89,7 @@ def _collate_fn(batch):
     return nodes, pairs, bonds, init_xyz, init_pos, init_atom, init_CA, label_xyz, seq_l, pdbs, res_atom
 
 def amber_relax(input_file, out_file):
+    #### amber relaxation from Alphafold2 source code https://github.com/deepmind/alphafold
     test_config = {'max_iterations': 1,
                'tolerance': 2.39,
                'stiffness': 10.0,
@@ -107,7 +108,6 @@ def amber_relax(input_file, out_file):
       f.close()
     except Exception as e:
       print(input_file)
-
 
 def dir_path(string):
     if os.path.isdir(string):
