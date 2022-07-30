@@ -24,58 +24,6 @@ warnings.filterwarnings("ignore")
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def refine_coords(coords, n_steps=1):
-    vdw_dist, cov_dist = 3.0, 3.78
-    k_vdw, k_cov = 100.0, 100.0
-    min_speed = 0.001
-
-    for i in range(n_steps):
-        n_res = coords.size(0)
-        accels = coords * 0
-
-        # Steric clashing
-        crep = coords.unsqueeze(0).expand(n_res, -1, -1)
-        diffs = crep - crep.transpose(0, 1)
-        dists = diffs.norm(dim=2).clamp(min=0.01, max=10.0)
-        norm_diffs = diffs / dists.unsqueeze(2)
-        violate = (dists < vdw_dist).to(torch.float) * (vdw_dist - dists)
-        forces = k_vdw * violate
-        pair_accels = forces.unsqueeze(2) * norm_diffs
-        accels += pair_accels.sum(dim=0)
-
-        # Adjacent C-alphas
-        diffs = coords[1:] - coords[:-1]
-        dists = diffs.norm(dim=1).clamp(min=0.1)
-        norm_diffs = diffs / dists.unsqueeze(1)
-        violate = (dists - cov_dist).clamp(max=3.0)
-        forces = k_cov * violate
-        accels_cov = forces.unsqueeze(1) * norm_diffs
-        accels[:-1] += accels_cov
-        accels[1: ] -= accels_cov
-
-        coords = coords + accels.clamp(min=-100.0, max=100.0) * min_speed
-
-    return coords
-
-def xyz2pdb(tar, xyz, res_atom, outdir):
-    f = open(outdir+"/"+tar+".pdb","w")
-    i = 1
-    j = 1
-    for res in res_atom:
-        res_name = res[0:3]
-        #print(res_name)
-        for atom in res_atom[res]:
-            atom_seq= j
-            res_seq= i
-            x = xyz[j-1][0]
-            y = xyz[j-1][1]
-            z = xyz[j-1][2]
-            line="{:6s}{:5d} {:^4s} {:3s} {:1s}{:4d}    {:8.3f}{:8.3f}{:8.3f}{:6.2f}{:6.2f}".format('ATOM',atom_seq,atom,res_name,'A',res_seq,x,y,z,0,0)
-            f.write(line+"\n")
-            j = j+1
-        i = i+1
-    f.close()
-
 def _collate_fn(batch):
     nodes = []
     pairs = []
@@ -134,10 +82,9 @@ def datalist(pdb_dir,true_dir,train_dir,lst,tm_thre=0.0,test_mode=False):
         if tm >= tm_thre:
             continue
         if test_mode:
-            train_lst.append(["/storage/htc/bdm/tianqi/capsule-5769140/data/init_model_casp14/"+tar+".pdb","/storage/htc/bdm/tianqi/capsule-5769140/data/init_model_casp14/"+tar+".npy","/storage/htc/bdm/tianqi/capsule-5769140/data/init_model_casp14/"+tar+".npy",tm])
+            train_lst.append(["data/init_model_casp14/"+tar+".pdb","data/init_model_casp14/"+tar+".npy","data/init_model_casp14/"+tar+".npy",tm])
         else:
-            #train_lst.append([pdb_dir+"/all/"+tar+"_rotate.pdb",true_dir+"/pdb/"+tar+".pdb",tm])
-            train_lst.append([pdb_dir+"/clean/"+tar+".pdb",true_dir+"/clean/"+tar+".pdb",tm])
+            train_lst.append([pdb_dir+"/"+tar+".pdb",true_dir+"/"+tar+".pdb",tm])
     return train_lst
 
 if __name__ == '__main__':
@@ -177,11 +124,11 @@ if __name__ == '__main__':
     pl.utilities.seed.seed_everything(seed=test_seed)
 
     src_dir = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
-    pdb_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/init_model"
-    true_dir = "/storage/htc/bdm/tianqi/capsule-5769140/data/true_model"
+    pdb_dir = "data/AF2_model"
+    true_dir = "data/true_model"
     train_lst = datalist(pdb_dir, true_dir, train_dir,"train"+str(lst)+".lst",tm_thre=1.1)
     val_lst = datalist(pdb_dir, true_dir, train_dir,"valid"+str(lst)+".lst",tm_thre=1.1)
-    test_lst = datalist(pdb_dir, true_dir, train_dir,"test_clean.lst",tm_thre=1.1,test_mode=False)
+    test_lst = datalist(pdb_dir, true_dir, train_dir,"test.lst",tm_thre=1.1,test_mode=False)
     
     train_dataset = Data(train_lst)
     train_loader = DataLoader(train_dataset, shuffle=True, pin_memory=False, num_workers=args.num_workers,batch_size=args.batch_size,collate_fn=_collate_fn)
@@ -218,7 +165,7 @@ if __name__ == '__main__':
                                  )
     else:
         logger = TensorBoardLogger(out_path, name="log")
-        trainer = pl.Trainer(gpus=num_gpus,max_epochs=epochs,
+        trainer = pl.Trainer(max_epochs=epochs,
                              accumulate_grad_batches=batch_size,
                              default_root_dir=out_path,
                              accelerator='ddp',
@@ -228,90 +175,7 @@ if __name__ == '__main__':
                              #resume_from_checkpoint=os.path.join(out_path, 'last.ckpt')
                              )
 
-    if test_mode:
-        model = test_model.load_from_checkpoint("output/model1/SE3Refine-epoch=13-avg_rmse=2.783.ckpt")
-        model = model.to(device)
-        model.eval()
-        with torch.no_grad():
-            for batch in test_loader:
-                nodes, pair, bond, init_pos, init_xyz, init_atom, init_CA, label_xyz, seq_l, pdbs, res_atom = batch
-                init_CA = init_CA.to(device)
-                bsz = 1
-                L = seq_l[0]
-                
-                pdb = os.path.basename(pdbs[0])
-                pdb = re.sub("\.pdb","",pdb)
-                print(pdb)
-
-                init_xyz = init_xyz.reshape(L, 1, 3)
-                #init_xyz = torch.cat([init_xyz, init_xyz*torch.tensor([1,1,-1], dtype=init_xyz.dtype, device=init_xyz.device)])
-                init_xyz = init_xyz.reshape(bsz,L,1,3)
-                init_xyz = init_xyz.to(device)
-                
-                init_pos = init_pos.reshape(L, 1, 3)
-                #init_pos = torch.cat([init_pos, init_pos*torch.tensor([1,1,-1], dtype=init_pos.dtype, device=init_pos.device)])
-                init_pos = init_pos.reshape(bsz,L,1,3)
-                
-                #nodes = torch.cat([nodes, nodes])
-                #pair = torch.cat([pair, pair])
-                pair = pair.reshape(bsz,L,L,12)
-                
-                idx = torch.arange(L).long().view(1, L)
-                idx = idx.to(device)
-                #idx = torch.cat([idx, idx])
-                idx = idx.reshape(bsz,L)
-                idx = idx.to(device)
-                
-                nodes = model.norm_node1(nodes.unsqueeze(1))
-                nodes = nodes.reshape(bsz,L,58)
-                nodes = nodes.to(device)
-                nodes = model.norm_node2(model.embed_node(nodes))
-                
-                pair = pair.permute(0,3,1,2)
-                pair = model.norm_edge1(pair)
-                pair = pair.permute(0,2,3,1)
-                pair = pair.to(device)
-                pair = model.norm_edge2(model.embed_e1(pair))
-                
-                #neighbor = get_bonded_neigh(idx)
-                #neighbor = neighbor.to(device)
-                rbf_feat = rbf(torch.cdist(init_xyz[:,:,0,:], init_xyz[:,:,0,:]))
-                rbf_feat = rbf_feat.to(device)
-
-                bond = bond.reshape(1,L,L,1)
-                bond = bond.to(device)
-                #pair = torch.cat((pair, rbf_feat), dim=-1)
-                pair = torch.cat((pair, rbf_feat, bond), dim=-1)
-                pair = model.norm_edge3(model.embed_e2(pair)) 
-                
-                # define graph
-                #xyz:[2, 138, 3, 3], pair:[2, 138, 138, 32], idx:[2, 138], top_k:64
-                G = make_graph(init_xyz, pair, idx, top_k=128)
-                l1_feats = init_pos # l1 features = displacement vector to CA
-                l1_feats = l1_feats.reshape(bsz*L,-1, 3)
-                l1_feats = l1_feats.to(device)
-                
-                # apply SE(3) Transformer & update coordinates
-                #node.reshape(B*L, -1, 1):[276, 32, 1], l1_feats:[276, 3, 3]
-                shift = model.se3(G, nodes.reshape(bsz*L, -1, 1), l1_feats) # 0: [276, 8, 1] 1: [276, 3, 3]
-                offset = shift['1'].reshape(bsz, L, -1, 3) # (B, L, 3, 3)  torch.Size([2, 138, 3, 3])
-                
-                offset = offset[0,:,0,:]
-                res_num,_ = init_CA.size()
-                start = 0
-                end = 0
-                xyz_new = []
-                for i in range(res_num):
-                    start = end
-                    end += init_atom[i]
-                    xyz_new.append(init_CA[i] + offset[start:end,:])
-                
-                xyz_new = torch.cat(xyz_new)
-
-                os.system("mkdir -p output/pre")
-                xyz2pdb(pdb, xyz_new.detach().cpu().numpy(), res_atom, "output/pre")
-    else:
-        time1 = time.time()
-        trainer.fit(test_model, train_loader, val_loader)
-        time2 = time.time()
-        print('{} epochs takes {} seconds using {} GPUs.'.format(epochs, time2 - time1, num_gpus))
+    time1 = time.time()
+    trainer.fit(test_model, train_loader, val_loader)
+    time2 = time.time()
+    print('{} epochs takes {} seconds using {} GPUs.'.format(epochs, time2 - time1, num_gpus))
