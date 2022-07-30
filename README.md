@@ -40,10 +40,16 @@ All the required data for training are provided as below and avaiable at [![DOI]
 
 ## Training
 ```bash
-sh train.sh
+cd data
+wget https://zenodo.org/record/6944368/files/AF2_model.tar.gz
+wget https://zenodo.org/record/6944368/files/true_experimental_structure.tar.gz
+tar xvzf AF2_model.tar.gz
+tar xvzf true_experimental_structure.tar.gz
 
+conda activate ATOMRefine
 python train.py --data <data_dir> --out_path <out_dir> --lst 1
 lst: training set id (1 - 10) as 10 folds
+e.g. python train.py --data data/train_lst --out_path model --lst 1
 ```
 
 ## References
