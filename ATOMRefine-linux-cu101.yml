@@ -7,10 +7,10 @@ channels:
   - defaults
 dependencies:
   - biopython=1.78=py38h497a2fe_2
+  - biopandas=0.2.9
   - cudatoolkit=10.2.89=h8f6ccaa_8
   - numpy=1.20.2=py38h2d18471_0
   - numpy-base=1.20.2=py38hfae3a4d_0
-  - pandas=1.2.5=py38h1abd341_0
   - pillow=8.2.0=py38he98fc37_0
   - pip=21.1.3=py38h06a4308_0
   - python=3.8.10=h12debd9_8
@@ -18,17 +18,18 @@ dependencies:
   - python-louvain=0.15=pyhd3deb0d_0
   - python_abi=3.8=2_cp38
   - pytorch=1.8.1=py3.8_cuda10.2_cudnn7.6.5_0
-  - pytorch-cluster=1.5.9=py38_torch_1.8.0_cu102
   - pytorch-geometric=1.7.2=py38_torch_1.8.0_cu102
-  - pytorch-scatter=2.0.7=py38_torch_1.8.0_cu102
-  - pytorch-sparse=0.6.10=py38_torch_1.8.0_cu102
-  - pytorch-spline-conv=1.2.1=py38_torch_1.8.0_cu102
-  - scikit-learn=0.24.2=py38ha9443f7_0
   - setuptools=52.0.0=py38h06a4308_0
   - six=1.16.0=pyhd3eb1b0_0
   - torchvision=0.9.1=py38_cu102
+  - pytorch-lightning=1.5.9
   - wheel=0.36.2=pyhd3eb1b0_0
+  - pdbfixer
+  - openmm=7.5.1
+  - jax
   - pip:
-    - decorator==4.4.2
     - dgl-cu102==0.6.1
     - scipy==1.7.0
+    - ml-collections
+    - dm-tree
+    - simtk

@@ -17,6 +17,9 @@ from network2 import get_bonded_neigh,rbf,make_graph
 import dgl
 import numpy as np
 
+from amber import protein
+from amber import relax
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -30,7 +33,6 @@ def xyz2pdb(tar, xyz, res_atom, outdir):
     j = 1
     for res in res_atom:
         res_name = res[0:3]
-        #print(res_name)
         for atom in res_atom[res]:
             atom_seq= j
             res_seq= i
@@ -86,6 +88,26 @@ def _collate_fn(batch):
 
     return nodes, pairs, bonds, init_xyz, init_pos, init_atom, init_CA, label_xyz, seq_l, pdbs, res_atom
 
+def amber_relax(input_file, out_file):
+    test_config = {'max_iterations': 1,
+               'tolerance': 2.39,
+               'stiffness': 10.0,
+               'exclude_residues': [],
+               'max_outer_iterations': 1,
+               'use_gpu': False}
+
+    amber_relax = relax.AmberRelaxation(**test_config)
+
+    with open(input_file) as f:
+      test_prot = protein.from_pdb_string(f.read())
+    try:
+      pdb_min, debug_info, num_violations = amber_relax.process(prot=test_prot)
+      f = open(out_file,"w")
+      f.write(pdb_min)
+      f.close()
+    except Exception as e:
+      print(input_file)
+
 
 def dir_path(string):
     if os.path.isdir(string):
@@ -127,6 +149,7 @@ if __name__ == '__main__':
     ap.add_argument('--num_workers', type=int, required=False, default=4)
     ap.add_argument('--test_seed', type=int, required=False, default=None)
     ap.add_argument('--test', required=False, action='store_true')
+    ap.add_argument('--amber', required=False, action='store_true')
 
     args = ap.parse_args()
     network = args.network
@@ -137,6 +160,7 @@ if __name__ == '__main__':
     num_gpus = args.num_gpus
     num_workers = args.num_workers
     test_mode = args.test
+    amber_mode = args.amber
     test_seed = args.test_seed
 
     pl.utilities.seed.seed_everything(seed=test_seed)
@@ -176,21 +200,16 @@ if __name__ == '__main__':
                     print(pdb+"....model"+str(lst))
 
                     init_xyz = init_xyz.reshape(L, 1, 3)
-                    #init_xyz = torch.cat([init_xyz, init_xyz*torch.tensor([1,1,-1], dtype=init_xyz.dtype, device=init_xyz.device)])
                     init_xyz = init_xyz.reshape(bsz,L,1,3)
                     init_xyz = init_xyz.to(device)
                     
                     init_pos = init_pos.reshape(L, 1, 3)
-                    #init_pos = torch.cat([init_pos, init_pos*torch.tensor([1,1,-1], dtype=init_pos.dtype, device=init_pos.device)])
                     init_pos = init_pos.reshape(bsz,L,1,3)
                     
-                    #nodes = torch.cat([nodes, nodes])
-                    #pair = torch.cat([pair, pair])
                     pair = pair.reshape(bsz,L,L,12)
                     
                     idx = torch.arange(L).long().view(1, L)
                     idx = idx.to(device)
-                    #idx = torch.cat([idx, idx])
                     idx = idx.reshape(bsz,L)
                     idx = idx.to(device)
                     
@@ -205,28 +224,23 @@ if __name__ == '__main__':
                     pair = pair.to(device)
                     pair = model.norm_edge2(model.embed_e1(pair))
                     
-                    #neighbor = get_bonded_neigh(idx)
-                    #neighbor = neighbor.to(device)
                     rbf_feat = rbf(torch.cdist(init_xyz[:,:,0,:], init_xyz[:,:,0,:]))
                     rbf_feat = rbf_feat.to(device)
 
                     bond = bond.reshape(1,L,L,1)
                     bond = bond.to(device)
-                    #pair = torch.cat((pair, rbf_feat), dim=-1)
                     pair = torch.cat((pair, rbf_feat, bond), dim=-1)
                     pair = model.norm_edge3(model.embed_e2(pair)) 
                     
                     # define graph
-                    #xyz:[2, 138, 3, 3], pair:[2, 138, 138, 32], idx:[2, 138], top_k:64
                     G = make_graph(init_xyz, pair, idx, top_k=128)
                     l1_feats = init_pos # l1 features = displacement vector to CA
                     l1_feats = l1_feats.reshape(bsz*L,-1, 3)
                     l1_feats = l1_feats.to(device)
                     
-                    # apply SE(3) Transformer & update coordinates
-                    #node.reshape(B*L, -1, 1):[276, 32, 1], l1_feats:[276, 3, 3]
-                    shift = model.se3(G, nodes.reshape(bsz*L, -1, 1), l1_feats) # 0: [276, 8, 1] 1: [276, 3, 3]
-                    offset = shift['1'].reshape(bsz, L, -1, 3) # (B, L, 3, 3)  torch.Size([2, 138, 3, 3])
+                    # SE(3) Transformer
+                    shift = model.se3(G, nodes.reshape(bsz*L, -1, 1), l1_feats)
+                    offset = shift['1'].reshape(bsz, L, -1, 3)
                     
                     offset = offset[0,:,0,:]
                     res_num,_ = init_CA.size()
@@ -239,7 +253,6 @@ if __name__ == '__main__':
                         xyz_new.append(init_CA[i] + offset[start:end,:])
                     
                     xyz_new = torch.cat(xyz_new)
-                    #os.system("mkdir -p "+out_path +"/tmp")
                     if not os.path.exists(out_path +"/tmp"):
                         os.makedirs(out_path +"/tmp")
                     xyz2pdb(pdb+"_"+str(lst), xyz_new.detach().cpu().numpy(), res_atom, out_path +"/tmp")
@@ -267,6 +280,11 @@ if __name__ == '__main__':
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".tmp "+out_path+"/"+tar+"_"+str(lst)+".pdb")
         else:
             for lst in model_dict.keys():
+                os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")
+
+        if amber_mode:
+            for lst in model_dict.keys():
+                amber_relax(out_path+"/"+tar+"_"+str(lst)+".pdb", out_path+"/tmp/"+tar+"_"+str(lst)+".pdb")
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")
         os.system("rm -r "+out_path+"/tmp")
         print("Prediction finished......")
