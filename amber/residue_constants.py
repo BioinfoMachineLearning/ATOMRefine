@@ -18,9 +18,7 @@ import collections
 import functools
 import os
 from typing import List, Mapping, Tuple
-
 import numpy as np
-import tree
 
 # Internal import (35fd).
 
@@ -387,97 +385,6 @@ BondAngle = collections.namedtuple(
     'BondAngle',
     ['atom1_name', 'atom2_name', 'atom3name', 'angle_rad', 'stddev'])
 
-
-@functools.lru_cache(maxsize=None)
-def load_stereo_chemical_props() -> Tuple[Mapping[str, List[Bond]],
-                                          Mapping[str, List[Bond]],
-                                          Mapping[str, List[BondAngle]]]:
-  """Load stereo_chemical_props.txt into a nice structure.
-
-  Load literature values for bond lengths and bond angles and translate
-  bond angles into the length of the opposite edge of the triangle
-  ("residue_virtual_bonds").
-
-  Returns:
-    residue_bonds: Dict that maps resname -> list of Bond tuples.
-    residue_virtual_bonds: Dict that maps resname -> list of Bond tuples.
-    residue_bond_angles: Dict that maps resname -> list of BondAngle tuples.
-  """
-  stereo_chemical_props_path = os.path.join(
-      os.path.dirname(os.path.abspath(__file__)), 'stereo_chemical_props.txt'
-  )
-  with open(stereo_chemical_props_path, 'rt') as f:
-    stereo_chemical_props = f.read()
-  lines_iter = iter(stereo_chemical_props.splitlines())
-  # Load bond lengths.
-  residue_bonds = {}
-  next(lines_iter)  # Skip header line.
-  for line in lines_iter:
-    if line.strip() == '-':
-      break
-    bond, resname, length, stddev = line.split()
-    atom1, atom2 = bond.split('-')
-    if resname not in residue_bonds:
-      residue_bonds[resname] = []
-    residue_bonds[resname].append(
-        Bond(atom1, atom2, float(length), float(stddev)))
-  residue_bonds['UNK'] = []
-
-  # Load bond angles.
-  residue_bond_angles = {}
-  next(lines_iter)  # Skip empty line.
-  next(lines_iter)  # Skip header line.
-  for line in lines_iter:
-    if line.strip() == '-':
-      break
-    bond, resname, angle_degree, stddev_degree = line.split()
-    atom1, atom2, atom3 = bond.split('-')
-    if resname not in residue_bond_angles:
-      residue_bond_angles[resname] = []
-    residue_bond_angles[resname].append(
-        BondAngle(atom1, atom2, atom3,
-                  float(angle_degree) / 180. * np.pi,
-                  float(stddev_degree) / 180. * np.pi))
-  residue_bond_angles['UNK'] = []
-
-  def make_bond_key(atom1_name, atom2_name):
-    """Unique key to lookup bonds."""
-    return '-'.join(sorted([atom1_name, atom2_name]))
-
-  # Translate bond angles into distances ("virtual bonds").
-  residue_virtual_bonds = {}
-  for resname, bond_angles in residue_bond_angles.items():
-    # Create a fast lookup dict for bond lengths.
-    bond_cache = {}
-    for b in residue_bonds[resname]:
-      bond_cache[make_bond_key(b.atom1_name, b.atom2_name)] = b
-    residue_virtual_bonds[resname] = []
-    for ba in bond_angles:
-      bond1 = bond_cache[make_bond_key(ba.atom1_name, ba.atom2_name)]
-      bond2 = bond_cache[make_bond_key(ba.atom2_name, ba.atom3name)]
-
-      # Compute distance between atom1 and atom3 using the law of cosines
-      # c^2 = a^2 + b^2 - 2ab*cos(gamma).
-      gamma = ba.angle_rad
-      length = np.sqrt(bond1.length**2 + bond2.length**2
-                       - 2 * bond1.length * bond2.length * np.cos(gamma))
-
-      # Propagation of uncertainty assuming uncorrelated errors.
-      dl_outer = 0.5 / length
-      dl_dgamma = (2 * bond1.length * bond2.length * np.sin(gamma)) * dl_outer
-      dl_db1 = (2 * bond1.length - 2 * bond2.length * np.cos(gamma)) * dl_outer
-      dl_db2 = (2 * bond2.length - 2 * bond1.length * np.cos(gamma)) * dl_outer
-      stddev = np.sqrt((dl_dgamma * ba.stddev)**2 +
-                       (dl_db1 * bond1.stddev)**2 +
-                       (dl_db2 * bond2.stddev)**2)
-      residue_virtual_bonds[resname].append(
-          Bond(ba.atom1_name, ba.atom3name, length, stddev))
-
-  return (residue_bonds,
-          residue_virtual_bonds,
-          residue_bond_angles)
-
-
 # Between-residue bond lengths for general bonds (first element) and for Proline
 # (second element).
 between_res_bond_length_c_n = [1.329, 1.341]
@@ -541,50 +448,6 @@ unk_restype_index = restype_num  # Catch-all index for unknown restypes.
 
 restypes_with_x = restypes + ['X']
 restype_order_with_x = {restype: i for i, restype in enumerate(restypes_with_x)}
-
-
-def sequence_to_onehot(
-    sequence: str,
-    mapping: Mapping[str, int],
-    map_unknown_to_x: bool = False) -> np.ndarray:
-  """Maps the given sequence into a one-hot encoded matrix.
-
-  Args:
-    sequence: An amino acid sequence.
-    mapping: A dictionary mapping amino acids to integers.
-    map_unknown_to_x: If True, any amino acid that is not in the mapping will be
-      mapped to the unknown amino acid 'X'. If the mapping doesn't contain
-      amino acid 'X', an error will be thrown. If False, any amino acid not in
-      the mapping will throw an error.
-
-  Returns:
-    A numpy array of shape (seq_len, num_unique_aas) with one-hot encoding of
-    the sequence.
-
-  Raises:
-    ValueError: If the mapping doesn't contain values from 0 to
-      num_unique_aas - 1 without any gaps.
-  """
-  num_entries = max(mapping.values()) + 1
-
-  if sorted(set(mapping.values())) != list(range(num_entries)):
-    raise ValueError('The mapping must have values from 0 to num_unique_aas-1 '
-                     'without any gaps. Got: %s' % sorted(mapping.values()))
-
-  one_hot_arr = np.zeros((len(sequence), num_entries), dtype=np.int32)
-
-  for aa_index, aa_type in enumerate(sequence):
-    if map_unknown_to_x:
-      if aa_type.isalpha() and aa_type.isupper():
-        aa_id = mapping.get(aa_type, mapping['X'])
-      else:
-        raise ValueError(f'Invalid character in the sequence: {aa_type}')
-    else:
-      aa_id = mapping[aa_type]
-    one_hot_arr[aa_index, aa_id] = 1
-
-  return one_hot_arr
-
 
 restype_1to3 = {
     'A': 'ALA',
@@ -691,7 +554,6 @@ MAP_HHBLITS_AATYPE_TO_OUR_AATYPE = tuple(
     restypes_with_x_and_gap.index(ID_TO_HHBLITS_AA[i])
     for i in range(len(restypes_with_x_and_gap)))
 
-
 def _make_standard_atom_mask() -> np.ndarray:
   """Returns [num_res_types, num_atom_types] mask array."""
   # +1 to account for unknown (all 0s).
@@ -707,67 +569,6 @@ def _make_standard_atom_mask() -> np.ndarray:
 
 STANDARD_ATOM_MASK = _make_standard_atom_mask()
 
-
-# A one hot representation for the first and second atoms defining the axis
-# of rotation for each chi-angle in each residue.
-def chi_angle_atom(atom_index: int) -> np.ndarray:
-  """Define chi-angle rigid groups via one-hot representations."""
-  chi_angles_index = {}
-  one_hots = []
-
-  for k, v in chi_angles_atoms.items():
-    indices = [atom_types.index(s[atom_index]) for s in v]
-    indices.extend([-1]*(4-len(indices)))
-    chi_angles_index[k] = indices
-
-  for r in restypes:
-    res3 = restype_1to3[r]
-    one_hot = np.eye(atom_type_num)[chi_angles_index[res3]]
-    one_hots.append(one_hot)
-
-  one_hots.append(np.zeros([4, atom_type_num]))  # Add zeros for residue `X`.
-  one_hot = np.stack(one_hots, axis=0)
-  one_hot = np.transpose(one_hot, [0, 2, 1])
-
-  return one_hot
-
-chi_atom_1_one_hot = chi_angle_atom(1)
-chi_atom_2_one_hot = chi_angle_atom(2)
-
-# An array like chi_angles_atoms but using indices rather than names.
-chi_angles_atom_indices = [chi_angles_atoms[restype_1to3[r]] for r in restypes]
-chi_angles_atom_indices = tree.map_structure(
-    lambda atom_name: atom_order[atom_name], chi_angles_atom_indices)
-chi_angles_atom_indices = np.array([
-    chi_atoms + ([[0, 0, 0, 0]] * (4 - len(chi_atoms)))
-    for chi_atoms in chi_angles_atom_indices])
-
-# Mapping from (res_name, atom_name) pairs to the atom's chi group index
-# and atom index within that group.
-chi_groups_for_atom = collections.defaultdict(list)
-for res_name, chi_angle_atoms_for_res in chi_angles_atoms.items():
-  for chi_group_i, chi_group in enumerate(chi_angle_atoms_for_res):
-    for atom_i, atom in enumerate(chi_group):
-      chi_groups_for_atom[(res_name, atom)].append((chi_group_i, atom_i))
-chi_groups_for_atom = dict(chi_groups_for_atom)
-
-
-def _make_rigid_transformation_4x4(ex, ey, translation):
-  """Create a rigid 4x4 transformation matrix from two axes and transl."""
-  # Normalize ex.
-  ex_normalized = ex / np.linalg.norm(ex)
-
-  # make ey perpendicular to ex
-  ey_normalized = ey - np.dot(ey, ex_normalized) * ex_normalized
-  ey_normalized /= np.linalg.norm(ey_normalized)
-
-  # compute ez as cross product
-  eznorm = np.cross(ex_normalized, ey_normalized)
-  m = np.stack([ex_normalized, ey_normalized, eznorm, translation]).transpose()
-  m = np.concatenate([m, [[0., 0., 0., 1.]]], axis=0)
-  return m
-
-
 # create an array with (restype, atomtype) --> rigid_group_idx
 # and an array with (restype, atomtype, coord) for the atom positions
 # and compute affine transformation matrices (4,4) from one rigid group to the
@@ -781,77 +582,96 @@ restype_atom14_rigid_group_positions = np.zeros([21, 14, 3], dtype=np.float32)
 restype_rigid_group_default_frame = np.zeros([21, 8, 4, 4], dtype=np.float32)
 
 
-def _make_rigid_group_constants():
-  """Fill the arrays above."""
-  for restype, restype_letter in enumerate(restypes):
-    resname = restype_1to3[restype_letter]
-    for atomname, group_idx, atom_position in rigid_group_atom_positions[
-        resname]:
-      atomtype = atom_order[atomname]
-      restype_atom37_to_rigid_group[restype, atomtype] = group_idx
-      restype_atom37_mask[restype, atomtype] = 1
-      restype_atom37_rigid_group_positions[restype, atomtype, :] = atom_position
+@functools.lru_cache(maxsize=None)
+def load_stereo_chemical_props() -> Tuple[Mapping[str, List[Bond]],
+                                          Mapping[str, List[Bond]],
+                                          Mapping[str, List[BondAngle]]]:
+  """Load stereo_chemical_props.txt into a nice structure.
 
-      atom14idx = restype_name_to_atom14_names[resname].index(atomname)
-      restype_atom14_to_rigid_group[restype, atom14idx] = group_idx
-      restype_atom14_mask[restype, atom14idx] = 1
-      restype_atom14_rigid_group_positions[restype,
-                                           atom14idx, :] = atom_position
+  Load literature values for bond lengths and bond angles and translate
+  bond angles into the length of the opposite edge of the triangle
+  ("residue_virtual_bonds").
 
-  for restype, restype_letter in enumerate(restypes):
-    resname = restype_1to3[restype_letter]
-    atom_positions = {name: np.array(pos) for name, _, pos
-                      in rigid_group_atom_positions[resname]}
+  Returns:
+    residue_bonds: Dict that maps resname -> list of Bond tuples.
+    residue_virtual_bonds: Dict that maps resname -> list of Bond tuples.
+    residue_bond_angles: Dict that maps resname -> list of BondAngle tuples.
+  """
+  stereo_chemical_props_path = os.path.join(
+      os.path.dirname(os.path.abspath(__file__)), 'stereo_chemical_props.txt'
+  )
+  print(stereo_chemical_props_path)
+  with open(stereo_chemical_props_path, 'rt') as f:
+    stereo_chemical_props = f.read()
+  lines_iter = iter(stereo_chemical_props.splitlines())
+  # Load bond lengths.
+  residue_bonds = {}
+  next(lines_iter)  # Skip header line.
+  for line in lines_iter:
+    if line.strip() == '-':
+      break
+    bond, resname, length, stddev = line.split()
+    atom1, atom2 = bond.split('-')
+    if resname not in residue_bonds:
+      residue_bonds[resname] = []
+    residue_bonds[resname].append(
+        Bond(atom1, atom2, float(length), float(stddev)))
+  residue_bonds['UNK'] = []
 
-    # backbone to backbone is the identity transform
-    restype_rigid_group_default_frame[restype, 0, :, :] = np.eye(4)
+  # Load bond angles.
+  residue_bond_angles = {}
+  next(lines_iter)  # Skip empty line.
+  next(lines_iter)  # Skip header line.
+  for line in lines_iter:
+    if line.strip() == '-':
+      break
+    bond, resname, angle_degree, stddev_degree = line.split()
+    atom1, atom2, atom3 = bond.split('-')
+    if resname not in residue_bond_angles:
+      residue_bond_angles[resname] = []
+    residue_bond_angles[resname].append(
+        BondAngle(atom1, atom2, atom3,
+                  float(angle_degree) / 180. * np.pi,
+                  float(stddev_degree) / 180. * np.pi))
+  residue_bond_angles['UNK'] = []
 
-    # pre-omega-frame to backbone (currently dummy identity matrix)
-    restype_rigid_group_default_frame[restype, 1, :, :] = np.eye(4)
+  def make_bond_key(atom1_name, atom2_name):
+    """Unique key to lookup bonds."""
+    return '-'.join(sorted([atom1_name, atom2_name]))
 
-    # phi-frame to backbone
-    mat = _make_rigid_transformation_4x4(
-        ex=atom_positions['N'] - atom_positions['CA'],
-        ey=np.array([1., 0., 0.]),
-        translation=atom_positions['N'])
-    restype_rigid_group_default_frame[restype, 2, :, :] = mat
+  # Translate bond angles into distances ("virtual bonds").
+  residue_virtual_bonds = {}
+  for resname, bond_angles in residue_bond_angles.items():
+    # Create a fast lookup dict for bond lengths.
+    bond_cache = {}
+    for b in residue_bonds[resname]:
+      bond_cache[make_bond_key(b.atom1_name, b.atom2_name)] = b
+    residue_virtual_bonds[resname] = []
+    for ba in bond_angles:
+      bond1 = bond_cache[make_bond_key(ba.atom1_name, ba.atom2_name)]
+      bond2 = bond_cache[make_bond_key(ba.atom2_name, ba.atom3name)]
 
-    # psi-frame to backbone
-    mat = _make_rigid_transformation_4x4(
-        ex=atom_positions['C'] - atom_positions['CA'],
-        ey=atom_positions['CA'] - atom_positions['N'],
-        translation=atom_positions['C'])
-    restype_rigid_group_default_frame[restype, 3, :, :] = mat
+      # Compute distance between atom1 and atom3 using the law of cosines
+      # c^2 = a^2 + b^2 - 2ab*cos(gamma).
+      gamma = ba.angle_rad
+      length = np.sqrt(bond1.length**2 + bond2.length**2
+                       - 2 * bond1.length * bond2.length * np.cos(gamma))
 
-    # chi1-frame to backbone
-    if chi_angles_mask[restype][0]:
-      base_atom_names = chi_angles_atoms[resname][0]
-      base_atom_positions = [atom_positions[name] for name in base_atom_names]
-      mat = _make_rigid_transformation_4x4(
-          ex=base_atom_positions[2] - base_atom_positions[1],
-          ey=base_atom_positions[0] - base_atom_positions[1],
-          translation=base_atom_positions[2])
-      restype_rigid_group_default_frame[restype, 4, :, :] = mat
+      # Propagation of uncertainty assuming uncorrelated errors.
+      dl_outer = 0.5 / length
+      dl_dgamma = (2 * bond1.length * bond2.length * np.sin(gamma)) * dl_outer
+      dl_db1 = (2 * bond1.length - 2 * bond2.length * np.cos(gamma)) * dl_outer
+      dl_db2 = (2 * bond2.length - 2 * bond1.length * np.cos(gamma)) * dl_outer
+      stddev = np.sqrt((dl_dgamma * ba.stddev)**2 +
+                       (dl_db1 * bond1.stddev)**2 +
+                       (dl_db2 * bond2.stddev)**2)
+      residue_virtual_bonds[resname].append(
+          Bond(ba.atom1_name, ba.atom3name, length, stddev))
 
-    # chi2-frame to chi1-frame
-    # chi3-frame to chi2-frame
-    # chi4-frame to chi3-frame
-    # luckily all rotation axes for the next frame start at (0,0,0) of the
-    # previous frame
-    for chi_idx in range(1, 4):
-      if chi_angles_mask[restype][chi_idx]:
-        axis_end_atom_name = chi_angles_atoms[resname][chi_idx][2]
-        axis_end_atom_position = atom_positions[axis_end_atom_name]
-        mat = _make_rigid_transformation_4x4(
-            ex=axis_end_atom_position,
-            ey=np.array([-1., 0., 0.]),
-            translation=axis_end_atom_position)
-        restype_rigid_group_default_frame[restype, 4 + chi_idx, :, :] = mat
-
-
-_make_rigid_group_constants()
-
-
+  return (residue_bonds,
+          residue_virtual_bonds,
+          residue_bond_angles)
+  
 def make_atom14_dists_bounds(overlap_tolerance=1.5,
                              bond_length_tolerance_factor=15):
   """compute upper and lower bounds for bonds to assess violations."""

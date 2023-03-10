@@ -103,6 +103,7 @@ def amber_relax(input_file, out_file):
       test_prot = protein.from_pdb_string(f.read())
     try:
       pdb_min, debug_info, num_violations = amber_relax.process(prot=test_prot)
+      print("AmberRelaxation has been done!")
       f = open(out_file,"w")
       f.write(pdb_min)
       f.close()
@@ -283,6 +284,7 @@ if __name__ == '__main__':
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")
 
         if amber_mode:
+            print(amber_mode)
             for lst in model_dict.keys():
                 amber_relax(out_path+"/"+tar+"_"+str(lst)+".pdb", out_path+"/tmp/"+tar+"_"+str(lst)+".pdb")
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")

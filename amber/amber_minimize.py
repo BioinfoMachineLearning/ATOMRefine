@@ -1,15 +1,33 @@
+# Copyright 2021 DeepMind Technologies Limited
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Restrained Amber Minimization of a structure."""
 
 import io
 import time
-from typing import Collection, Optional, Sequence
+import numbers
+import functools
+import collections
+from typing import Collection, Optional, Sequence, Dict, Mapping
 
 from absl import logging
 from amber import protein
 from amber import residue_constants
-from amber import folding
 from amber import cleanup
 from amber import utils
+import jax
+import jax.numpy as jnp
 import ml_collections
 import numpy as np
 from simtk import openmm
@@ -121,12 +139,21 @@ def _check_cleaned_atoms(pdb_cleaned_string: str, pdb_ref_string: str):
                              f"coordinates of reference atom {rat}.")
 
 
+def _check_residues_are_well_defined(prot: protein.Protein):
+  """Checks that all residues contain non-empty atom sets."""
+  if (prot.atom_mask.sum(axis=-1) == 0).any():
+    raise ValueError("Amber minimization can only be performed on proteins with"
+                     " well-defined residues. This protein contains at least"
+                     " one residue with no atoms.")
+
 def _check_atom_mask_is_ideal(prot):
   """Sanity-check the atom mask is ideal, up to a possible OXT."""
   atom_mask = prot.atom_mask
   ideal_atom_mask = protein.ideal_atom_mask(prot)
   utils.assert_equal_nonterminal_atom_types(atom_mask, ideal_atom_mask)
 
+def squared_difference(x, y):
+  return jnp.square(x - y)
 
 def clean_protein(
     prot: protein.Protein,
@@ -141,6 +168,8 @@ def clean_protein(
   Returns:
     pdb_string: A string of the cleaned protein.
   """
+  _check_atom_mask_is_ideal(prot)
+
   # Clean pdb.
   prot_pdb_string = protein.to_pdb(prot)
   pdb_file = io.StringIO(prot_pdb_string)
@@ -292,6 +321,501 @@ def make_atom14_positions(prot):
   return prot
 
 
+
+def between_residue_bond_loss(
+    pred_atom_positions: jnp.ndarray,  # (N, 37(14), 3)
+    pred_atom_mask: jnp.ndarray,  # (N, 37(14))
+    residue_index: jnp.ndarray,  # (N)
+    aatype: jnp.ndarray,  # (N)
+    tolerance_factor_soft=12.0,
+    tolerance_factor_hard=12.0
+) -> Dict[str, jnp.ndarray]:
+  """Flat-bottom loss to penalize structural violations between residues.
+
+  This is a loss penalizing any violation of the geometry around the peptide
+  bond between consecutive amino acids. This loss corresponds to
+  Jumper et al. (2021) Suppl. Sec. 1.9.11, eq 44, 45.
+
+  Args:
+    pred_atom_positions: Atom positions in atom37/14 representation
+    pred_atom_mask: Atom mask in atom37/14 representation
+    residue_index: Residue index for given amino acid, this is assumed to be
+      monotonically increasing.
+    aatype: Amino acid type of given residue
+    tolerance_factor_soft: soft tolerance factor measured in standard deviations
+      of pdb distributions
+    tolerance_factor_hard: hard tolerance factor measured in standard deviations
+      of pdb distributions
+
+  Returns:
+    Dict containing:
+      * 'c_n_loss_mean': Loss for peptide bond length violations
+      * 'ca_c_n_loss_mean': Loss for violations of bond angle around C spanned
+          by CA, C, N
+      * 'c_n_ca_loss_mean': Loss for violations of bond angle around N spanned
+          by C, N, CA
+      * 'per_residue_loss_sum': sum of all losses for each residue
+      * 'per_residue_violation_mask': mask denoting all residues with violation
+          present.
+  """
+  assert len(pred_atom_positions.shape) == 3
+  assert len(pred_atom_mask.shape) == 2
+  assert len(residue_index.shape) == 1
+  assert len(aatype.shape) == 1
+
+  # Get the positions of the relevant backbone atoms.
+  this_ca_pos = pred_atom_positions[:-1, 1, :]  # (N - 1, 3)
+  this_ca_mask = pred_atom_mask[:-1, 1]         # (N - 1)
+  this_c_pos = pred_atom_positions[:-1, 2, :]   # (N - 1, 3)
+  this_c_mask = pred_atom_mask[:-1, 2]          # (N - 1)
+  next_n_pos = pred_atom_positions[1:, 0, :]    # (N - 1, 3)
+  next_n_mask = pred_atom_mask[1:, 0]           # (N - 1)
+  next_ca_pos = pred_atom_positions[1:, 1, :]   # (N - 1, 3)
+  next_ca_mask = pred_atom_mask[1:, 1]          # (N - 1)
+  has_no_gap_mask = ((residue_index[1:] - residue_index[:-1]) == 1.0).astype(
+      jnp.float32)
+
+  # Compute loss for the C--N bond.
+  c_n_bond_length = jnp.sqrt(
+      1e-6 + jnp.sum(squared_difference(this_c_pos, next_n_pos), axis=-1))
+
+  # The C-N bond to proline has slightly different length because of the ring.
+  next_is_proline = (
+      aatype[1:] == residue_constants.resname_to_idx['PRO']).astype(jnp.float32)
+  gt_length = (
+      (1. - next_is_proline) * residue_constants.between_res_bond_length_c_n[0]
+      + next_is_proline * residue_constants.between_res_bond_length_c_n[1])
+  gt_stddev = (
+      (1. - next_is_proline) *
+      residue_constants.between_res_bond_length_stddev_c_n[0] +
+      next_is_proline * residue_constants.between_res_bond_length_stddev_c_n[1])
+  c_n_bond_length_error = jnp.sqrt(1e-6 +
+                                   jnp.square(c_n_bond_length - gt_length))
+  c_n_loss_per_residue = jax.nn.relu(
+      c_n_bond_length_error - tolerance_factor_soft * gt_stddev)
+  mask = this_c_mask * next_n_mask * has_no_gap_mask
+  c_n_loss = jnp.sum(mask * c_n_loss_per_residue) / (jnp.sum(mask) + 1e-6)
+  c_n_violation_mask = mask * (
+      c_n_bond_length_error > (tolerance_factor_hard * gt_stddev))
+
+  # Compute loss for the angles.
+  ca_c_bond_length = jnp.sqrt(1e-6 + jnp.sum(
+      squared_difference(this_ca_pos, this_c_pos), axis=-1))
+  n_ca_bond_length = jnp.sqrt(1e-6 + jnp.sum(
+      squared_difference(next_n_pos, next_ca_pos), axis=-1))
+
+  c_ca_unit_vec = (this_ca_pos - this_c_pos) / ca_c_bond_length[:, None]
+  c_n_unit_vec = (next_n_pos - this_c_pos) / c_n_bond_length[:, None]
+  n_ca_unit_vec = (next_ca_pos - next_n_pos) / n_ca_bond_length[:, None]
+
+  ca_c_n_cos_angle = jnp.sum(c_ca_unit_vec * c_n_unit_vec, axis=-1)
+  gt_angle = residue_constants.between_res_cos_angles_ca_c_n[0]
+  gt_stddev = residue_constants.between_res_bond_length_stddev_c_n[0]
+  ca_c_n_cos_angle_error = jnp.sqrt(
+      1e-6 + jnp.square(ca_c_n_cos_angle - gt_angle))
+  ca_c_n_loss_per_residue = jax.nn.relu(
+      ca_c_n_cos_angle_error - tolerance_factor_soft * gt_stddev)
+  mask = this_ca_mask * this_c_mask * next_n_mask * has_no_gap_mask
+  ca_c_n_loss = jnp.sum(mask * ca_c_n_loss_per_residue) / (jnp.sum(mask) + 1e-6)
+  ca_c_n_violation_mask = mask * (ca_c_n_cos_angle_error >
+                                  (tolerance_factor_hard * gt_stddev))
+
+  c_n_ca_cos_angle = jnp.sum((-c_n_unit_vec) * n_ca_unit_vec, axis=-1)
+  gt_angle = residue_constants.between_res_cos_angles_c_n_ca[0]
+  gt_stddev = residue_constants.between_res_cos_angles_c_n_ca[1]
+  c_n_ca_cos_angle_error = jnp.sqrt(
+      1e-6 + jnp.square(c_n_ca_cos_angle - gt_angle))
+  c_n_ca_loss_per_residue = jax.nn.relu(
+      c_n_ca_cos_angle_error - tolerance_factor_soft * gt_stddev)
+  mask = this_c_mask * next_n_mask * next_ca_mask * has_no_gap_mask
+  c_n_ca_loss = jnp.sum(mask * c_n_ca_loss_per_residue) / (jnp.sum(mask) + 1e-6)
+  c_n_ca_violation_mask = mask * (
+      c_n_ca_cos_angle_error > (tolerance_factor_hard * gt_stddev))
+
+  # Compute a per residue loss (equally distribute the loss to both
+  # neighbouring residues).
+  per_residue_loss_sum = (c_n_loss_per_residue +
+                          ca_c_n_loss_per_residue +
+                          c_n_ca_loss_per_residue)
+  per_residue_loss_sum = 0.5 * (jnp.pad(per_residue_loss_sum, [[0, 1]]) +
+                                jnp.pad(per_residue_loss_sum, [[1, 0]]))
+
+  # Compute hard violations.
+  violation_mask = jnp.max(
+      jnp.stack([c_n_violation_mask,
+                 ca_c_n_violation_mask,
+                 c_n_ca_violation_mask]), axis=0)
+  violation_mask = jnp.maximum(
+      jnp.pad(violation_mask, [[0, 1]]),
+      jnp.pad(violation_mask, [[1, 0]]))
+
+  return {'c_n_loss_mean': c_n_loss,  # shape ()
+          'ca_c_n_loss_mean': ca_c_n_loss,  # shape ()
+          'c_n_ca_loss_mean': c_n_ca_loss,  # shape ()
+          'per_residue_loss_sum': per_residue_loss_sum,  # shape (N)
+          'per_residue_violation_mask': violation_mask  # shape (N)
+         }
+
+
+def between_residue_clash_loss(
+    atom14_pred_positions: jnp.ndarray,  # (N, 14, 3)
+    atom14_atom_exists: jnp.ndarray,  # (N, 14)
+    atom14_atom_radius: jnp.ndarray,  # (N, 14)
+    residue_index: jnp.ndarray,  # (N)
+    overlap_tolerance_soft=1.5,
+    overlap_tolerance_hard=1.5
+) -> Dict[str, jnp.ndarray]:
+  """Loss to penalize steric clashes between residues.
+
+  This is a loss penalizing any steric clashes due to non bonded atoms in
+  different peptides coming too close. This loss corresponds to the part with
+  different residues of
+  Jumper et al. (2021) Suppl. Sec. 1.9.11, eq 46.
+
+  Args:
+    atom14_pred_positions: Predicted positions of atoms in
+      global prediction frame
+    atom14_atom_exists: Mask denoting whether atom at positions exists for given
+      amino acid type
+    atom14_atom_radius: Van der Waals radius for each atom.
+    residue_index: Residue index for given amino acid.
+    overlap_tolerance_soft: Soft tolerance factor.
+    overlap_tolerance_hard: Hard tolerance factor.
+
+  Returns:
+    Dict containing:
+      * 'mean_loss': average clash loss
+      * 'per_atom_loss_sum': sum of all clash losses per atom, shape (N, 14)
+      * 'per_atom_clash_mask': mask whether atom clashes with any other atom
+          shape (N, 14)
+  """
+  assert len(atom14_pred_positions.shape) == 3
+  assert len(atom14_atom_exists.shape) == 2
+  assert len(atom14_atom_radius.shape) == 2
+  assert len(residue_index.shape) == 1
+
+  # Create the distance matrix.
+  # (N, N, 14, 14)
+  dists = jnp.sqrt(1e-10 + jnp.sum(
+      squared_difference(
+          atom14_pred_positions[:, None, :, None, :],
+          atom14_pred_positions[None, :, None, :, :]),
+      axis=-1))
+
+  # Create the mask for valid distances.
+  # shape (N, N, 14, 14)
+  dists_mask = (atom14_atom_exists[:, None, :, None] *
+                atom14_atom_exists[None, :, None, :])
+
+  # Mask out all the duplicate entries in the lower triangular matrix.
+  # Also mask out the diagonal (atom-pairs from the same residue) -- these atoms
+  # are handled separately.
+  dists_mask *= (
+      residue_index[:, None, None, None] < residue_index[None, :, None, None])
+
+  # Backbone C--N bond between subsequent residues is no clash.
+  c_one_hot = jax.nn.one_hot(2, num_classes=14)
+  n_one_hot = jax.nn.one_hot(0, num_classes=14)
+  neighbour_mask = ((residue_index[:, None, None, None] +
+                     1) == residue_index[None, :, None, None])
+  c_n_bonds = neighbour_mask * c_one_hot[None, None, :,
+                                         None] * n_one_hot[None, None, None, :]
+  dists_mask *= (1. - c_n_bonds)
+
+  # Disulfide bridge between two cysteines is no clash.
+  cys_sg_idx = residue_constants.restype_name_to_atom14_names['CYS'].index('SG')
+  cys_sg_one_hot = jax.nn.one_hot(cys_sg_idx, num_classes=14)
+  disulfide_bonds = (cys_sg_one_hot[None, None, :, None] *
+                     cys_sg_one_hot[None, None, None, :])
+  dists_mask *= (1. - disulfide_bonds)
+
+  # Compute the lower bound for the allowed distances.
+  # shape (N, N, 14, 14)
+  dists_lower_bound = dists_mask * (atom14_atom_radius[:, None, :, None] +
+                                    atom14_atom_radius[None, :, None, :])
+
+  # Compute the error.
+  # shape (N, N, 14, 14)
+  dists_to_low_error = dists_mask * jax.nn.relu(
+      dists_lower_bound - overlap_tolerance_soft - dists)
+
+  # Compute the mean loss.
+  # shape ()
+  mean_loss = (jnp.sum(dists_to_low_error)
+               / (1e-6 + jnp.sum(dists_mask)))
+
+  # Compute the per atom loss sum.
+  # shape (N, 14)
+  per_atom_loss_sum = (jnp.sum(dists_to_low_error, axis=[0, 2]) +
+                       jnp.sum(dists_to_low_error, axis=[1, 3]))
+
+  # Compute the hard clash mask.
+  # shape (N, N, 14, 14)
+  clash_mask = dists_mask * (
+      dists < (dists_lower_bound - overlap_tolerance_hard))
+
+  # Compute the per atom clash.
+  # shape (N, 14)
+  per_atom_clash_mask = jnp.maximum(
+      jnp.max(clash_mask, axis=[0, 2]),
+      jnp.max(clash_mask, axis=[1, 3]))
+
+  return {'mean_loss': mean_loss,  # shape ()
+          'per_atom_loss_sum': per_atom_loss_sum,  # shape (N, 14)
+          'per_atom_clash_mask': per_atom_clash_mask  # shape (N, 14)
+         }
+
+def within_residue_violations(
+    atom14_pred_positions: jnp.ndarray,  # (N, 14, 3)
+    atom14_atom_exists: jnp.ndarray,  # (N, 14)
+    atom14_dists_lower_bound: jnp.ndarray,  # (N, 14, 14)
+    atom14_dists_upper_bound: jnp.ndarray,  # (N, 14, 14)
+    tighten_bounds_for_loss=0.0,
+) -> Dict[str, jnp.ndarray]:
+  """Loss to penalize steric clashes within residues.
+
+  This is a loss penalizing any steric violations or clashes of non-bonded atoms
+  in a given peptide. This loss corresponds to the part with
+  the same residues of
+  Jumper et al. (2021) Suppl. Sec. 1.9.11, eq 46.
+
+  Args:
+    atom14_pred_positions: Predicted positions of atoms in
+      global prediction frame
+    atom14_atom_exists: Mask denoting whether atom at positions exists for given
+      amino acid type
+    atom14_dists_lower_bound: Lower bound on allowed distances.
+    atom14_dists_upper_bound: Upper bound on allowed distances
+    tighten_bounds_for_loss: Extra factor to tighten loss
+
+  Returns:
+    Dict containing:
+      * 'per_atom_loss_sum': sum of all clash losses per atom, shape (N, 14)
+      * 'per_atom_clash_mask': mask whether atom clashes with any other atom
+          shape (N, 14)
+  """
+  assert len(atom14_pred_positions.shape) == 3
+  assert len(atom14_atom_exists.shape) == 2
+  assert len(atom14_dists_lower_bound.shape) == 3
+  assert len(atom14_dists_upper_bound.shape) == 3
+
+  # Compute the mask for each residue.
+  # shape (N, 14, 14)
+  dists_masks = (1. - jnp.eye(14, 14)[None])
+  dists_masks *= (atom14_atom_exists[:, :, None] *
+                  atom14_atom_exists[:, None, :])
+
+  # Distance matrix
+  # shape (N, 14, 14)
+  dists = jnp.sqrt(1e-10 + jnp.sum(
+      squared_difference(
+          atom14_pred_positions[:, :, None, :],
+          atom14_pred_positions[:, None, :, :]),
+      axis=-1))
+
+  # Compute the loss.
+  # shape (N, 14, 14)
+  dists_to_low_error = jax.nn.relu(
+      atom14_dists_lower_bound + tighten_bounds_for_loss - dists)
+  dists_to_high_error = jax.nn.relu(
+      dists - (atom14_dists_upper_bound - tighten_bounds_for_loss))
+  loss = dists_masks * (dists_to_low_error + dists_to_high_error)
+
+  # Compute the per atom loss sum.
+  # shape (N, 14)
+  per_atom_loss_sum = (jnp.sum(loss, axis=1) +
+                       jnp.sum(loss, axis=2))
+
+  # Compute the violations mask.
+  # shape (N, 14, 14)
+  violations = dists_masks * ((dists < atom14_dists_lower_bound) |
+                              (dists > atom14_dists_upper_bound))
+
+  # Compute the per atom violations.
+  # shape (N, 14)
+  per_atom_violations = jnp.maximum(
+      jnp.max(violations, axis=1), jnp.max(violations, axis=2))
+
+  return {'per_atom_loss_sum': per_atom_loss_sum,  # shape (N, 14)
+          'per_atom_violations': per_atom_violations  # shape (N, 14)
+         }
+
+def batched_gather(params, indices, axis=0, batch_dims=0):
+  """Implements a JAX equivalent of `tf.gather` with `axis` and `batch_dims`."""
+  take_fn = lambda p, i: jnp.take(p, i, axis=axis)
+  for _ in range(batch_dims):
+    take_fn = jax.vmap(take_fn)
+  return take_fn(params, indices)
+
+def find_structural_violations(
+    batch: Dict[str, jnp.ndarray],
+    atom14_pred_positions: jnp.ndarray,  # (N, 14, 3)
+    config: ml_collections.ConfigDict
+    ):
+  """Computes several checks for structural violations."""
+
+  # Compute between residue backbone violations of bonds and angles.
+  connection_violations = between_residue_bond_loss(
+      pred_atom_positions=atom14_pred_positions,
+      pred_atom_mask=batch['atom14_atom_exists'].astype(jnp.float32),
+      residue_index=batch['residue_index'].astype(jnp.float32),
+      aatype=batch['aatype'],
+      tolerance_factor_soft=config.violation_tolerance_factor,
+      tolerance_factor_hard=config.violation_tolerance_factor)
+
+  # Compute the Van der Waals radius for every atom
+  # (the first letter of the atom name is the element type).
+  # Shape: (N, 14).
+  atomtype_radius = jnp.array([
+      residue_constants.van_der_waals_radius[name[0]]
+      for name in residue_constants.atom_types
+  ])
+  atom14_atom_radius = batch['atom14_atom_exists'] * batched_gather(
+      atomtype_radius, batch['residx_atom14_to_atom37'])
+
+  # Compute the between residue clash loss.
+  between_residue_clashes = between_residue_clash_loss(
+      atom14_pred_positions=atom14_pred_positions,
+      atom14_atom_exists=batch['atom14_atom_exists'],
+      atom14_atom_radius=atom14_atom_radius,
+      residue_index=batch['residue_index'],
+      overlap_tolerance_soft=config.clash_overlap_tolerance,
+      overlap_tolerance_hard=config.clash_overlap_tolerance)
+
+  # Compute all within-residue violations (clashes,
+  # bond length and angle violations).
+  restype_atom14_bounds = residue_constants.make_atom14_dists_bounds(
+      overlap_tolerance=config.clash_overlap_tolerance,
+      bond_length_tolerance_factor=config.violation_tolerance_factor)
+  atom14_dists_lower_bound = batched_gather(
+      restype_atom14_bounds['lower_bound'], batch['aatype'])
+  atom14_dists_upper_bound = batched_gather(
+      restype_atom14_bounds['upper_bound'], batch['aatype'])
+  within_residue_violations_val = within_residue_violations(
+      atom14_pred_positions=atom14_pred_positions,
+      atom14_atom_exists=batch['atom14_atom_exists'],
+      atom14_dists_lower_bound=atom14_dists_lower_bound,
+      atom14_dists_upper_bound=atom14_dists_upper_bound,
+      tighten_bounds_for_loss=0.0)
+
+  # Combine them to a single per-residue violation mask (used later for LDDT).
+  per_residue_violations_mask = jnp.max(jnp.stack([
+      connection_violations['per_residue_violation_mask'],
+      jnp.max(between_residue_clashes['per_atom_clash_mask'], axis=-1),
+      jnp.max(within_residue_violations_val['per_atom_violations'],
+              axis=-1)]), axis=0)
+
+  return {
+      'between_residues': {
+          'bonds_c_n_loss_mean':
+              connection_violations['c_n_loss_mean'],  # ()
+          'angles_ca_c_n_loss_mean':
+              connection_violations['ca_c_n_loss_mean'],  # ()
+          'angles_c_n_ca_loss_mean':
+              connection_violations['c_n_ca_loss_mean'],  # ()
+          'connections_per_residue_loss_sum':
+              connection_violations['per_residue_loss_sum'],  # (N)
+          'connections_per_residue_violation_mask':
+              connection_violations['per_residue_violation_mask'],  # (N)
+          'clashes_mean_loss':
+              between_residue_clashes['mean_loss'],  # ()
+          'clashes_per_atom_loss_sum':
+              between_residue_clashes['per_atom_loss_sum'],  # (N, 14)
+          'clashes_per_atom_clash_mask':
+              between_residue_clashes['per_atom_clash_mask'],  # (N, 14)
+      },
+      'within_residues': {
+          'per_atom_loss_sum':
+              within_residue_violations_val['per_atom_loss_sum'],  # (N, 14)
+          'per_atom_violations':
+              within_residue_violations_val['per_atom_violations'],  # (N, 14),
+      },
+      'total_per_residue_violations_mask':
+          per_residue_violations_mask,  # (N)
+  }
+
+def mask_mean(mask, value, axis=None, drop_mask_channel=False, eps=1e-10):
+  """Masked mean."""
+  if drop_mask_channel:
+    mask = mask[..., 0]
+
+  mask_shape = mask.shape
+  value_shape = value.shape
+
+  assert len(mask_shape) == len(value_shape)
+
+  if isinstance(axis, numbers.Integral):
+    axis = [axis]
+  elif axis is None:
+    axis = list(range(len(mask_shape)))
+  assert isinstance(axis, collections.Iterable), (
+      'axis needs to be either an iterable, integer or "None"')
+
+def extreme_ca_ca_distance_violations(
+    pred_atom_positions: jnp.ndarray,  # (N, 37(14), 3)
+    pred_atom_mask: jnp.ndarray,  # (N, 37(14))
+    residue_index: jnp.ndarray,  # (N)
+    max_angstrom_tolerance=1.5
+    ) -> jnp.ndarray:
+  """Counts residues whose Ca is a large distance from its neighbour.
+
+  Measures the fraction of CA-CA pairs between consecutive amino acids that are
+  more than 'max_angstrom_tolerance' apart.
+
+  Args:
+    pred_atom_positions: Atom positions in atom37/14 representation
+    pred_atom_mask: Atom mask in atom37/14 representation
+    residue_index: Residue index for given amino acid, this is assumed to be
+      monotonically increasing.
+    max_angstrom_tolerance: Maximum distance allowed to not count as violation.
+  Returns:
+    Fraction of consecutive CA-CA pairs with violation.
+  """
+  this_ca_pos = pred_atom_positions[:-1, 1, :]  # (N - 1, 3)
+  this_ca_mask = pred_atom_mask[:-1, 1]         # (N - 1)
+  next_ca_pos = pred_atom_positions[1:, 1, :]  # (N - 1, 3)
+  next_ca_mask = pred_atom_mask[1:, 1]  # (N - 1)
+  has_no_gap_mask = ((residue_index[1:] - residue_index[:-1]) == 1.0).astype(
+      jnp.float32)
+  ca_ca_distance = jnp.sqrt(
+      1e-6 + jnp.sum(squared_difference(this_ca_pos, next_ca_pos), axis=-1))
+  violations = (ca_ca_distance -
+                residue_constants.ca_ca) > max_angstrom_tolerance
+  mask = this_ca_mask * next_ca_mask * has_no_gap_mask
+  return mask_mean(mask=mask, value=violations)
+
+def compute_violation_metrics(
+    batch: Dict[str, jnp.ndarray],
+    atom14_pred_positions: jnp.ndarray,  # (N, 14, 3)
+    violations: Dict[str, jnp.ndarray],
+    ) -> Dict[str, jnp.ndarray]:
+  """Compute several metrics to assess the structural violations."""
+
+  ret = {}
+  extreme_ca_ca_violations = extreme_ca_ca_distance_violations(
+      pred_atom_positions=atom14_pred_positions,
+      pred_atom_mask=batch['atom14_atom_exists'].astype(jnp.float32),
+      residue_index=batch['residue_index'].astype(jnp.float32))
+  ret['violations_extreme_ca_ca_distance'] = extreme_ca_ca_violations
+  ret['violations_between_residue_bond'] = mask_mean(
+      mask=batch['seq_mask'],
+      value=violations['between_residues'][
+          'connections_per_residue_violation_mask'])
+  ret['violations_between_residue_clash'] = mask_mean(
+      mask=batch['seq_mask'],
+      value=jnp.max(
+          violations['between_residues']['clashes_per_atom_clash_mask'],
+          axis=-1))
+  ret['violations_within_residue'] = mask_mean(
+      mask=batch['seq_mask'],
+      value=jnp.max(
+          violations['within_residues']['per_atom_violations'], axis=-1))
+  ret['violations_per_residue'] = mask_mean(
+      mask=batch['seq_mask'],
+      value=violations['total_per_residue_violations_mask'])
+  return ret
+
+
 def find_violations(prot_np: protein.Protein):
   """Analyzes a protein and returns structural violation information.
 
@@ -312,14 +836,14 @@ def find_violations(prot_np: protein.Protein):
   batch["seq_mask"] = np.ones_like(batch["aatype"], np.float32)
   batch = make_atom14_positions(batch)
 
-  violations = folding.find_structural_violations(
+  violations = find_structural_violations(
       batch=batch,
       atom14_pred_positions=batch["atom14_gt_positions"],
       config=ml_collections.ConfigDict(
           {"violation_tolerance_factor": 12,  # Taken from model config.
            "clash_overlap_tolerance": 1.5,  # Taken from model config.
           }))
-  violation_metrics = folding.compute_violation_metrics(
+  violation_metrics = compute_violation_metrics(
       batch=batch,
       atom14_pred_positions=batch["atom14_gt_positions"],
       violations=violations,
@@ -439,14 +963,15 @@ def run_pipeline(
 
   # `protein.to_pdb` will strip any poorly-defined residues so we need to
   # perform this check before `clean_protein`.
+  _check_residues_are_well_defined(prot)
   pdb_string = clean_protein(prot, checks=checks)
 
   exclude_residues = exclude_residues or []
   exclude_residues = set(exclude_residues)
   violations = np.inf
   iteration = 0
-
-  while violations > 0 and iteration < max_outer_iterations:
+  # while violations > 0 and iteration < max_outer_iterations:
+  while iteration < max_outer_iterations:
     ret = _run_one_iteration(
         pdb_string=pdb_string,
         exclude_residues=exclude_residues,
@@ -467,6 +992,7 @@ def run_pipeline(
         "iteration": iteration,
     })
     violations = ret["violations_per_residue"]
+    # print("violations:", violations)
     exclude_residues = exclude_residues.union(ret["residue_violations"])
 
     logging.info("Iteration completed: Einit %.2f Efinal %.2f Time %.2f s "
