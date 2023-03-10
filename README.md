@@ -53,7 +53,12 @@ python train.py --data <data_dir> --out_path <out_dir> --lst 1
 lst: training set id (1 - 10) as 10 folds
 e.g. python train.py --data data/train_lst --out_path model --lst 1
 ```
-
+[AlphaFold](https://github.com/deepmind/alphafold)
 ## References
 
 Tianqi Wu and Jianlin Cheng. Atomic protein structure refinement using all-atom graph representations and SE(3)-equivariant graph neural networks. bioRxiv, 2022. [link](https://doi.org/10.1101/2022.05.06.490934)
+
+## Declaration:
+The code in this repository's folder ./amber reuse the source code from [AlphaFold](https://github.com/deepmind/alphafold), which has been used under Apache-2.0 license, see the license ./amber/LICENSE.
+
+
