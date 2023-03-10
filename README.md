@@ -14,7 +14,7 @@ Atomic protein structure refinement using all-atom graph representations and SE(
 git clone https://github.com/BioinfoMachineLearning/ATOMRefine.git
 cd ATOMRefine
 conda env create -f ATOMRefine-linux-cu101.yml
-cd YOUR_ENV/atomrefine_virenv/lib/python3.8/site-packages
+cd YOUR_ENV/lib/python3.8/site-packages
 patch -p0 < ATOMRefine/amber/openmm.patch
 ```
 
