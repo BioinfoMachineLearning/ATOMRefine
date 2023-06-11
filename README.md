@@ -55,7 +55,7 @@ e.g. python train.py --data data/train_lst --out_path model --lst 1
 ```
 
 ## References
-[Tianqi Wu and Jianlin Cheng. Atomic protein structure refinement using all-atom graph representations and SE(3)-equivariant graph neural networks. bioRxiv, 2022.](https://doi.org/10.1101/2022.05.06.490934)
+[Wu, T., Guo, Z., & Cheng, J. (2023). Atomic protein structure refinement using all-atom graph representations and SE (3)-equivariant graph transformer. Bioinformatics, 39(5), btad298](https://academic.oup.com/bioinformatics/article/39/5/btad298/7152976)
 
 ## Declaration:
 The code in this repository's folder ./amber reuse the source code from [AlphaFold](https://github.com/deepmind/alphafold), which has been used under Apache-2.0 license, see the license ./amber/LICENSE.
