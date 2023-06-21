@@ -1,0 +1,6 @@
+# file to ignore
+.nfs000000000152350700000082
+# folder to ignore
+**/output/
+env/
+__pycache__/

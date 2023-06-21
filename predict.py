@@ -103,7 +103,7 @@ def amber_relax(input_file, out_file):
       test_prot = protein.from_pdb_string(f.read())
     try:
       pdb_min, debug_info, num_violations = amber_relax.process(prot=test_prot)
-      print("AmberRelaxation has been done!")
+      print(f"AmberRelaxation has been done on {input_file}!")
       f = open(out_file,"w")
       f.write(pdb_min)
       f.close()
@@ -136,7 +136,7 @@ def datalist(pdbfile, targetid, seqlen, outdir, test_mode=False):
                 os.system("rm "+outdir+"/"+tar+"_"+str(i)+".tmp")
                 train_lst.append([outdir+"/"+tar+"_"+str(i)+".pdb",outdir+"/"+tar+"_"+str(i)+".pdb"])
         else:
-            train_lst.append([pdbfile,pdbfile])
+            train_lst.append([pdbfile, pdbfile])
     return train_lst
 
 if __name__ == '__main__':
@@ -167,8 +167,13 @@ if __name__ == '__main__':
     pl.utilities.seed.seed_everything(seed=test_seed)
 
     src_dir = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
+    ori_pdbfile_copy = f"{out_path}/{targetid}.pdb"
+    os.system(f"cp {pdbfile} {ori_pdbfile_copy}")
+    #do the relaxation before refine
+    amber_relax(ori_pdbfile_copy, ori_pdbfile_copy)
 
-    test_lst = datalist(pdbfile, targetid, seqlen, out_path, test_mode=test_mode)
+    test_lst = datalist(ori_pdbfile_copy, targetid, seqlen, out_path, test_mode=test_mode)
+    print(test_lst)
     test_dataset = Data(test_lst,test_mode=True)
     test_loader = DataLoader(test_dataset, shuffle=False, pin_memory=False, num_workers=args.num_workers,batch_size=1,collate_fn=_collate_fn)
 
@@ -284,7 +289,7 @@ if __name__ == '__main__':
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")
 
         if amber_mode:
-            print(amber_mode)
+            print("Activate AmberRelaxation")
             for lst in model_dict.keys():
                 amber_relax(out_path+"/"+tar+"_"+str(lst)+".pdb", out_path+"/tmp/"+tar+"_"+str(lst)+".pdb")
                 os.system("cp "+out_path+"/tmp/"+tar+"_"+str(lst)+".pdb "+out_path+"/"+tar+"_"+str(lst)+".pdb")
